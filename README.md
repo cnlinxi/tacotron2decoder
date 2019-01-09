@@ -8,35 +8,81 @@ Reference: [Rayhane-mamah/Tacotron-2](https://github.com/Rayhane-mamah/Tacotron-
 
 ### How use it?
 
-- put wavs into one dir, the hierarchy should be:
+- **pretrain decoder** in Tacotron-2
 
-```
-project
-└───decoder_pretrain_wavs
-│   │
-│   └───haitian
-│       │   000001.wav
-│       │   000002.wav
-│       │   ...
-│   │
-│   └───biaobei
-│       │   10001.wav
-│       │   00003.wav
-│       │   ...
+    - put wavs into one dir, the hierarchy should be:
 
-```
+    ```
+    project
+    └───decoder_pretrain_wavs
+    │   │
+    │   └───haitian
+    │       │   000001.wav
+    │       │   000002.wav
+    │       │   ...
+    │   │
+    │   └───biaobei
+    │       │   10001.wav
+    │       │   00003.wav
+    │       │   ...
+    
+    ```
 
-then run `python /utils/prepare_pretrain_decoder_corpus.py`
+    then run `python /utils/prepare_pretrain_decoder_corpus.py`
 
-- preprocess corpus
+    - update hparams.py
 
-  run `python preprocess.py`
+      ```python
+      decoder_pretrain=True,
+      decoder_init_checkpoint='',
+      restore_pretrain_decoder=False,
+      ```
 
-- train model
+    - preprocess corpus
 
-  run `python train.py`
+      run `python preprocess.py`
+
+    - train model
+
+      run `python train.py`
+
+- **train whole Tacotron-2** with pretrained decoder
+ - put wavs into one dir, the hierarchy should be:
+
+    ```
+    project
+    └───biaobei
+    │   │
+    │   └───wavs
+    │       │   000001.wav
+    │       │   000002.wav
+    │       │   ...
+    │   │
+    │   └───biaobei.corpus
+    
+    ```
+
+    **the minimum amount of audio data is *under test*...**
+
+    - update hparams.py
+
+      ```python
+      decoder_pretrain=False,
+      decoder_init_checkpoint='',  # Specify the location of the pre-training model, tacotron_model.ckpt-160000
+      restore_pretrain_decoder=True,
+      ```
+
+    - preprocess corpus
+
+      run `python preprocess.py`
+
+    - train model
+
+      run `python train.py`
 
 ****
+
+
 
 ### Note
 
