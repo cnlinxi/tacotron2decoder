@@ -122,9 +122,14 @@ class Tacotron():
                     post_condition = hp.predict_linear and not gta
 
                     # Embeddings ==> [batch_size, sequence_length, embedding_dim]
-                    self.embedding_table = tf.get_variable(
-                        'inputs_embedding', [len(symbols), hp.embedding_dim], initializer=tf.zeros_initializer,
-                        dtype=tf.float32)
+                    if hp.decoder_pretrain:
+                        self.embedding_table = tf.get_variable(
+                            'inputs_embedding', [len(symbols), hp.embedding_dim], initializer=tf.zeros_initializer,
+                            dtype=tf.float32)
+                    else:
+                        self.embedding_table = tf.get_variable('inputs_embedding', [len(symbols), hp.embedding_dim],
+                                                               dtype=tf.float32)
+
                     embedded_inputs = tf.nn.embedding_lookup(self.embedding_table, tower_inputs[i])
 
                     # Encoder Cell ==> [batch_size, encoder_steps, encoder_lstm_units]
@@ -352,10 +357,16 @@ class Tacotron():
                     # Regularize variables
                     # Exclude all types of bias, RNN (Bengio et al. On the difficulty of training recurrent neural networks), embeddings and prediction projection layers.
                     # Note that we consider attention mechanism v_a weights as a prediction projection layer and we don't regularize it. (This gave better stability)
-                    regularization = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars
-                                               if not (
-                                'bias' in v.name or 'Bias' in v.name or '_projection' in v.name or 'inputs_embedding' in v.name
-                                or 'RNN' in v.name or 'LSTM' in v.name)]) * reg_weight
+                    if hp.decoder_pretrain:
+                        regularization = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars
+                                                   if not (
+                                    'bias' in v.name or 'Bias' in v.name or '_projection' in v.name or 'inputs_embedding' in v.name
+                                    or 'RNN' in v.name or 'LSTM' in v.name or 'encoder' in v.name)]) * reg_weight
+                    else:
+                        regularization = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars
+                                                   if not (
+                                    'bias' in v.name or 'Bias' in v.name or '_projection' in v.name or 'inputs_embedding' in v.name
+                                    or 'RNN' in v.name or 'LSTM' in v.name)]) * reg_weight
 
                     # Compute final loss term
                     self.tower_before_loss.append(before)
@@ -384,7 +395,6 @@ class Tacotron():
 
     def _get_assignment_map_from_checkpoint(self, tvars, init_checkpoint):
         """Compute the union of the current variables and checkpoint variables."""
-        assignment_map = {}
         initialized_variable_names = {}
 
         name_to_variable = collections.OrderedDict()
@@ -401,6 +411,10 @@ class Tacotron():
         for x in init_vars:
             (name, var) = (x[0], x[1])
             if name not in name_to_variable:
+                continue
+            if 'encoder' in name:
+                continue
+            if 'inputs_embedding' in name:
                 continue
             assignment_map[name] = name
             initialized_variable_names[name] = 1
@@ -460,6 +474,8 @@ class Tacotron():
                             if 'encoder' in gradient[0].name or 'encoder' in gradient[1].name:
                                 continue
                             # filter embedding?
+                            if 'inputs_embedding' in gradient[0].name or 'inputs_embedding' in gradient[1].name:
+                                continue
                             gradients_.append(gradient)
                         gradients = gradients_
                     tower_gradients.append(gradients)

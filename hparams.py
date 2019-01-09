@@ -43,7 +43,7 @@ hparams = tf.contrib.training.HParams(
 	# if you want to init decoder from pretrained model, it will not restore model
 	decoder_pretrain=False,  # train pretrained decoder model, only train decoder
 	decoder_init_checkpoint='',  # pretrained model path, '.ckpt' file path
-	restore_pretrain_decoder=True,  # init decoder from pretrained model, train all model and donot restore pretrained all model
+	restore_pretrain_decoder=True,  # init decoder from pretrained decoder model, train all model and donot restore pretrained all model
 	####
 	#Audio
 	#Audio parameters are the most important parameters to tune when using this work on your personal data. Below are the beginner steps to adapt

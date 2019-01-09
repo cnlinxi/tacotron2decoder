@@ -287,7 +287,7 @@ def train(log_dir, args, hparams):
                                 eval_model.tower_after_loss[0],
                                 eval_model.tower_stop_token_loss[0], eval_model.tower_mel_outputs[0][0],
                                 eval_model.tower_mel_targets[0][0],
-                                eval_model.tower_targets_lengths[0][0], eval_model.tower_alignments[0][0]
+                                eval_model.tower_targets_lengths[0][0], eval_model.tower_alignments[0][0],
                             ])
                             eval_losses.append(eloss)
                             before_losses.append(before_loss)
