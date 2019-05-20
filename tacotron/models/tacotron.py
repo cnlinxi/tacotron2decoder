@@ -1,5 +1,6 @@
 import re
 import collections
+import random
 
 import tensorflow as tf
 from tacotron.utils.symbols import symbols
@@ -32,7 +33,7 @@ class Tacotron():
         self._hparams = hparams
 
     def initialize(self, inputs, input_lengths, mel_targets=None, stop_token_targets=None, linear_targets=None,
-                   targets_lengths=None, gta=False,
+                   targets_lengths=None, input_flag=None, gta=False,
                    global_step=None, is_training=False, is_evaluating=False, split_infos=None):
         """
         Initializes the model for inference
@@ -70,6 +71,7 @@ class Tacotron():
             tower_input_lengths = tf.split(input_lengths, num_or_size_splits=hp.tacotron_num_gpus, axis=0)
             tower_targets_lengths = tf.split(targets_lengths, num_or_size_splits=hp.tacotron_num_gpus,
                                              axis=0) if targets_lengths is not None else targets_lengths
+            self.tower_input_flag = tf.split(input_flag, num_or_size_splits=hp.tacotron_num_gpus, axis=0)
 
             p_inputs = tf.py_func(split_func, [inputs, split_infos[:, 0]], lout_int)
             p_mel_targets = tf.py_func(split_func, [mel_targets, split_infos[:, 1]],
@@ -122,13 +124,8 @@ class Tacotron():
                     post_condition = hp.predict_linear and not gta
 
                     # Embeddings ==> [batch_size, sequence_length, embedding_dim]
-                    if hp.decoder_pretrain:
-                        self.embedding_table = tf.get_variable(
-                            'inputs_embedding', [len(symbols), hp.embedding_dim], initializer=tf.zeros_initializer,
-                            dtype=tf.float32)
-                    else:
-                        self.embedding_table = tf.get_variable('inputs_embedding', [len(symbols), hp.embedding_dim],
-                                                               dtype=tf.float32)
+                    self.embedding_table = tf.get_variable('inputs_embedding', [len(symbols), hp.embedding_dim],
+                                                           dtype=tf.float32)
 
                     embedded_inputs = tf.nn.embedding_lookup(self.embedding_table, tower_inputs[i])
 
@@ -142,8 +139,19 @@ class Tacotron():
 
                     # For shape visualization purpose
                     enc_conv_output_shape = encoder_cell.conv_output_shape
-                    if hp.decoder_pretrain:
-                        encoder_outputs = tf.stop_gradient(encoder_outputs)
+
+                    # if self._hparams.encoder_mode in ['no_text', 'random']:
+                    #     encoder_outputs = tf.stop_gradient(encoder_outputs)
+                    # if self._hparams.encoder_mode in ['no_text']:
+                    #     random_seq_length = random.randint(10, 30)
+                    #     encoder_outputs = tf.zeros([batch_size, random_seq_length, hp.encoder_lstm_units])
+                    # if self._hparams.encoder_mode in ['random']:
+                    #     random_seq_length = random.randint(10, 30)
+                    #     encoder_outputs = tf.random_uniform([batch_size, random_seq_length, hp.encoder_lstm_units])
+
+                    # if TEXT input, pred_exp will be FALSE
+                    pred_exp = tf.greater(tf.reduce_sum(self.tower_input_flag[i]), tf.constant(0, dtype=tf.int32))
+                    tf.cond(pred_exp, true_fn=lambda: tf.stop_gradient(encoder_outputs), false_fn=lambda: 0.)
 
                     # Decoder Parts
                     # Attention Decoder Prenet
@@ -357,16 +365,32 @@ class Tacotron():
                     # Regularize variables
                     # Exclude all types of bias, RNN (Bengio et al. On the difficulty of training recurrent neural networks), embeddings and prediction projection layers.
                     # Note that we consider attention mechanism v_a weights as a prediction projection layer and we don't regularize it. (This gave better stability)
-                    if hp.decoder_pretrain:
-                        regularization = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars
-                                                   if not (
+
+                    # if self._hparams.encoder_mode in ['no_text', 'random']:
+                    #     regularization = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars
+                    #                                if not (
+                    #                 'bias' in v.name or 'Bias' in v.name or '_projection' in v.name or 'inputs_embedding' in v.name
+                    #                 or 'RNN' in v.name or 'LSTM' in v.name or 'encoder' in v.name)]) * reg_weight
+                    # else:
+                    #     regularization = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars
+                    #                                if not (
+                    #                 'bias' in v.name or 'Bias' in v.name or '_projection' in v.name or 'inputs_embedding' in v.name
+                    #                 or 'RNN' in v.name or 'LSTM' in v.name)]) * reg_weight
+                    def no_text_fn():
+                        res = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars if not (
                                     'bias' in v.name or 'Bias' in v.name or '_projection' in v.name or 'inputs_embedding' in v.name
                                     or 'RNN' in v.name or 'LSTM' in v.name or 'encoder' in v.name)]) * reg_weight
-                    else:
-                        regularization = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars
-                                                   if not (
+                        return res
+
+                    def text_fn():
+                        res = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars if not (
                                     'bias' in v.name or 'Bias' in v.name or '_projection' in v.name or 'inputs_embedding' in v.name
                                     or 'RNN' in v.name or 'LSTM' in v.name)]) * reg_weight
+                        return res
+
+                    # if TEXT input, pred_exp will be FALSE
+                    pred_exp = tf.greater(tf.reduce_sum(self.tower_input_flag[i]), tf.constant(0, dtype=tf.int32))
+                    regularization = tf.cond(pred_exp, true_fn=text_fn, false_fn=no_text_fn)
 
                     # Compute final loss term
                     self.tower_before_loss.append(before)
@@ -424,7 +448,7 @@ class Tacotron():
 
     def restore_pretrain_decoder(self):
         '''
-        restore bert model
+        restore pretrain decoder
         '''
         if self._hparams.decoder_init_checkpoint:
             (assignment_map, initialized_variable_names) = self._get_assignment_map_from_checkpoint(self.all_vars,
@@ -464,8 +488,8 @@ class Tacotron():
                 # agg_loss += self.tower_loss[i]
                 with tf.variable_scope('optimizer') as scope:
                     gradients = optimizer.compute_gradients(self.tower_loss[i])
-                    if hp.decoder_pretrain:
-                        # filter gradients if gradient is None or v.name in 'encoder'
+
+                    def filter_gradients(gradients):
                         gradients_ = []
                         for gradient in gradients:
                             # gradient: tuple, gradient[0]:loss_grad, gradient[1]: layer
@@ -478,6 +502,28 @@ class Tacotron():
                                 continue
                             gradients_.append(gradient)
                         gradients = gradients_
+                        return gradients
+
+                    def false_fn(gradients):
+                        return gradients
+
+                    # if self._hparams.encoder_mode in ['no_text', 'random']:
+                    #     # filter gradients if gradient is None or v.name in 'encoder'
+                    #     gradients_ = []
+                    #     for gradient in gradients:
+                    #         # gradient: tuple, gradient[0]:loss_grad, gradient[1]: layer
+                    #         if (gradient[0] is None) or (gradient[1] is None):
+                    #             continue
+                    #         if 'encoder' in gradient[0].name or 'encoder' in gradient[1].name:
+                    #             continue
+                    #         # filter embedding?
+                    #         if 'inputs_embedding' in gradient[0].name or 'inputs_embedding' in gradient[1].name:
+                    #             continue
+                    #         gradients_.append(gradient)
+                    #     gradients = gradients_
+                    # pred_exp = tf.greater(tf.reduce_sum(self.tower_input_flag[i]), tf.constant(0, dtype=tf.int32))
+                    # gradients = tf.cond(pred_exp, true_fn=lambda: filter_gradients(gradients),
+                    #                     false_fn=lambda: false_fn(gradients))
                     tower_gradients.append(gradients)
 
         # 3. Average Gradient

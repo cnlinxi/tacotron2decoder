@@ -2,12 +2,14 @@ import os
 import threading
 import time
 import traceback
+import random
 
 import numpy as np
 import tensorflow as tf
 from infolog import log
 from sklearn.model_selection import train_test_split
 from tacotron.utils.text import text_to_sequence
+from tacotron.utils.symbols import _characters
 
 _batches_per_group = 64
 
@@ -81,13 +83,15 @@ class Feeder:
                 tf.placeholder(tf.float32, shape=(None, None, hparams.num_freq), name='linear_targets'),
                 tf.placeholder(tf.int32, shape=(None,), name='targets_lengths'),
                 tf.placeholder(tf.int32, shape=(hparams.tacotron_num_gpus, None), name='split_infos'),
+                tf.placeholder(tf.int32, shape=(None,), name='input_flag'),
             ]
 
             # Create queue for buffering data
-            queue = tf.FIFOQueue(8, [tf.int32, tf.int32, tf.float32, tf.float32, tf.float32, tf.int32, tf.int32],
+            queue = tf.FIFOQueue(8,
+                                 [tf.int32, tf.int32, tf.float32, tf.float32, tf.float32, tf.int32, tf.int32, tf.int32],
                                  name='input_queue')
             self._enqueue_op = queue.enqueue(self._placeholders)
-            self.inputs, self.input_lengths, self.mel_targets, self.token_targets, self.linear_targets, self.targets_lengths, self.split_infos = queue.dequeue()
+            self.inputs, self.input_lengths, self.mel_targets, self.token_targets, self.linear_targets, self.targets_lengths, self.split_infos, self.input_flag = queue.dequeue()
 
             self.inputs.set_shape(self._placeholders[0].shape)
             self.input_lengths.set_shape(self._placeholders[1].shape)
@@ -96,13 +100,15 @@ class Feeder:
             self.linear_targets.set_shape(self._placeholders[4].shape)
             self.targets_lengths.set_shape(self._placeholders[5].shape)
             self.split_infos.set_shape(self._placeholders[6].shape)
+            self.input_flag.set_shape(self._placeholders[7].shape)
 
             # Create eval queue for buffering eval data
-            eval_queue = tf.FIFOQueue(1, [tf.int32, tf.int32, tf.float32, tf.float32, tf.float32, tf.int32, tf.int32],
+            eval_queue = tf.FIFOQueue(1, [tf.int32, tf.int32, tf.float32, tf.float32, tf.float32, tf.int32, tf.int32,
+                                          tf.int32],
                                       name='eval_queue')
             self._eval_enqueue_op = eval_queue.enqueue(self._placeholders)
             self.eval_inputs, self.eval_input_lengths, self.eval_mel_targets, self.eval_token_targets, \
-            self.eval_linear_targets, self.eval_targets_lengths, self.eval_split_infos = eval_queue.dequeue()
+            self.eval_linear_targets, self.eval_targets_lengths, self.eval_split_infos, self.eval_input_flag = eval_queue.dequeue()
 
             self.eval_inputs.set_shape(self._placeholders[0].shape)
             self.eval_input_lengths.set_shape(self._placeholders[1].shape)
@@ -111,6 +117,11 @@ class Feeder:
             self.eval_linear_targets.set_shape(self._placeholders[4].shape)
             self.eval_targets_lengths.set_shape(self._placeholders[5].shape)
             self.eval_split_infos.set_shape(self._placeholders[6].shape)
+            self.eval_input_flag.set_shape(self._placeholders[7].shape)
+
+            self.input_text = 0
+            self.input_no_text = 1
+            self.input_random = 2
 
     def start_threads(self, session):
         self._session = session
@@ -125,17 +136,15 @@ class Feeder:
     def _get_test_groups(self):
         meta = self._test_meta[self._test_offset]
         self._test_offset += 1
-        if self._hparams.decoder_pretrain:
-            input_data=np.asarray([0])
-        else:
-            text = meta[5]
-            input_data = np.asarray(text_to_sequence(text, self._cleaner_names), dtype=np.int32)
+
+        text = meta[5]
+        input_data = np.asarray(text_to_sequence(text, self._cleaner_names), dtype=np.int32)
 
         mel_target = np.load(os.path.join(self._mel_dir, meta[1]))
         # Create parallel sequences containing zeros to represent a non finished sequence
         token_target = np.asarray([0.] * (len(mel_target) - 1))
         linear_target = np.load(os.path.join(self._linear_dir, meta[2]))
-        return (input_data, mel_target, token_target, linear_target, len(mel_target))
+        return (input_data, mel_target, token_target, linear_target, len(mel_target), self.input_text)
 
     def make_test_batches(self):
         start = time.time()
@@ -148,7 +157,7 @@ class Feeder:
         examples = [self._get_test_groups() for i in range(len(self._test_meta))]
 
         # Bucket examples based on similar output sequence length for efficiency
-        examples.sort(key=lambda x: x[-1])
+        examples.sort(key=lambda x: x[-2])
         batches = [examples[i: i + n] for i in range(0, len(examples), n)]
         np.random.shuffle(batches)
 
@@ -159,13 +168,34 @@ class Feeder:
         while not self._coord.should_stop():
             start = time.time()
 
+            pretrain_decoder_mode = self._hparams.pretrain_decoder_no_text or \
+                                    self._hparams.pretrain_decoder_little_text or \
+                                    self._hparams.pretrain_decoder_text_random
+            if pretrain_decoder_mode:
+                random_number = random.random()
+                if self._hparams.pretrain_decoder_no_text or \
+                        (self._hparams.pretrain_decoder_little_text and
+                         random_number >= self._hparams.decoder_text_rate) or \
+                        (self._hparams.pretrain_decoder_text_random and
+                         random_number >= self._hparams.decoder_text_rate):
+                    self._hparams.encoder_mode = 'no_text'
+                if (self._hparams.pretrain_decoder_little_text and
+                    random_number < self._hparams.decoder_text_rate) or \
+                        (self._hparams.pretrain_decoder_text_random and
+                         random_number < self._hparams.decoder_text_rate):
+                    self._hparams.encoder_mode = 'true_text'
+                if self._hparams.pretrain_decoder_text_random and \
+                        random_number > 1. - self._hparams.decoder_random_rate:
+                    self._hparams.encoder_mode = 'random'
+                log('random number: {}, TRAIN encoder mode: {}'.format(random_number, self._hparams.encoder_mode))
+
             # Read a group of examples
             n = self._hparams.tacotron_batch_size
             r = self._hparams.outputs_per_step
             examples = [self._get_next_example() for i in range(n * _batches_per_group)]
 
             # Bucket examples based on similar output sequence length for efficiency
-            examples.sort(key=lambda x: x[-1])
+            examples.sort(key=lambda x: x[-2])
             batches = [examples[i: i + n] for i in range(0, len(examples), n)]
             np.random.shuffle(batches)
 
@@ -190,18 +220,29 @@ class Feeder:
             np.random.shuffle(self._train_meta)
 
         meta = self._train_meta[self._train_offset]
+
         self._train_offset += 1
-        if self._hparams.decoder_pretrain:
-            input_data=np.asarray([0])
+
+        pretrain_decoder_mode = self._hparams.pretrain_decoder_no_text or \
+                                self._hparams.pretrain_decoder_little_text or \
+                                self._hparams.pretrain_decoder_text_random
+        if pretrain_decoder_mode and self._hparams.encoder_mode in ['no_text']:
+            input_data = np.asarray([0])
+            input_flag = self.input_no_text
+        elif pretrain_decoder_mode and self._hparams.encoder_mode in ['random']:
+            text = ''.join(random.sample(_characters, random.randint(1, len(_characters) - 1)))
+            input_data = np.asarray(text_to_sequence(text, self._cleaner_names), dtype=np.int32)
+            input_flag = self.input_random
         else:
             text = meta[5]
             input_data = np.asarray(text_to_sequence(text, self._cleaner_names), dtype=np.int32)
+            input_flag = self.input_text
 
         mel_target = np.load(os.path.join(self._mel_dir, meta[1]))
         # Create parallel sequences containing zeros to represent a non finished sequence
         token_target = np.asarray([0.] * (len(mel_target) - 1))
         linear_target = np.load(os.path.join(self._linear_dir, meta[2]))
-        return (input_data, mel_target, token_target, linear_target, len(mel_target))
+        return (input_data, mel_target, token_target, linear_target, len(mel_target), input_flag)
 
     def _prepare_batch(self, batches, outputs_per_step):
         assert 0 == len(batches) % self._hparams.tacotron_num_gpus
@@ -215,8 +256,9 @@ class Feeder:
         targets_lengths = None
         split_infos = []
 
-        targets_lengths = np.asarray([x[-1] for x in batches], dtype=np.int32)  # Used to mask loss
+        targets_lengths = np.asarray([x[-2] for x in batches], dtype=np.int32)  # Used to mask loss
         input_lengths = np.asarray([len(x[0]) for x in batches], dtype=np.int32)
+        input_flag = np.asarray([x[-1] for x in batches], dtype=np.int32)
 
         for i in range(self._hparams.tacotron_num_gpus):
             batch = batches[size_per_device * i:size_per_device * (i + 1)]
@@ -238,7 +280,8 @@ class Feeder:
             split_infos.append([input_max_len, mel_target_max_len, token_target_max_len, linear_target_max_len])
 
         split_infos = np.asarray(split_infos, dtype=np.int32)
-        return (inputs, input_lengths, mel_targets, token_targets, linear_targets, targets_lengths, split_infos)
+        return (
+            inputs, input_lengths, mel_targets, token_targets, linear_targets, targets_lengths, split_infos, input_flag)
 
     def _prepare_inputs(self, inputs):
         max_len = max([len(x) for x in inputs])

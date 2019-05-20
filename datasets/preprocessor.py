@@ -30,8 +30,8 @@ def build_from_path(hparams, input_dirs, mel_dir, linear_dir, wav_dir, n_jobs=12
     futures = []
     index = 1
     for input_dir in input_dirs:
-        chinese_metadata = glob.glob(os.path.join(input_dir, '*.corpus'))
-        for meta in chinese_metadata:
+        metadata = glob.glob(os.path.join(input_dir, 'metadata'))
+        for meta in metadata:
             with open(meta, 'rb') as fin:
                 for line in fin:
                     line = line.decode().strip('\n\r ').split('|')

@@ -90,14 +90,16 @@ def model_train_mode(args, feeder, hparams, global_step):
         if hparams.predict_linear:
             model.initialize(feeder.inputs, feeder.input_lengths, feeder.mel_targets, feeder.token_targets,
                              linear_targets=feeder.linear_targets,
+                             input_flag=feeder.input_flag,
                              targets_lengths=feeder.targets_lengths, global_step=global_step,
                              is_training=True, split_infos=feeder.split_infos)
         else:
             model.initialize(feeder.inputs, feeder.input_lengths, feeder.mel_targets, feeder.token_targets,
                              targets_lengths=feeder.targets_lengths, global_step=global_step,
+                             input_flag=feeder.input_flag,
                              is_training=True, split_infos=feeder.split_infos)
         model.add_loss()
-        if hparams.restore_pretrain_decoder:
+        if hparams.is_restore_pretrain_decoder:
             model.restore_pretrain_decoder()  # restore pretrained decoder model, restore then optimize
         model.add_optimizer(global_step)
         stats = add_train_stats(model, hparams)
@@ -114,11 +116,13 @@ def model_test_mode(args, feeder, hparams, global_step):
             model.initialize(feeder.eval_inputs, feeder.eval_input_lengths, feeder.eval_mel_targets,
                              feeder.eval_token_targets,
                              linear_targets=feeder.eval_linear_targets, targets_lengths=feeder.eval_targets_lengths,
+                             input_flag=feeder.input_flag,
                              global_step=global_step,
                              is_training=False, is_evaluating=True, split_infos=feeder.eval_split_infos)
         else:
             model.initialize(feeder.eval_inputs, feeder.eval_input_lengths, feeder.eval_mel_targets,
                              feeder.eval_token_targets,
+                             input_flag=feeder.input_flag,
                              targets_lengths=feeder.eval_targets_lengths, global_step=global_step, is_training=False,
                              is_evaluating=True,
                              split_infos=feeder.eval_split_infos)
@@ -187,7 +191,7 @@ def train(log_dir, args, hparams):
     step = 0
     time_window = ValueWindow(100)
     loss_window = ValueWindow(100)
-    saver = tf.train.Saver(max_to_keep=5)
+    saver = tf.train.Saver(max_to_keep=None)
 
     log('Tacotron training set to a maximum of {} steps'.format(args.tacotron_train_steps))
 
@@ -205,7 +209,9 @@ def train(log_dir, args, hparams):
 
             # saved model restoring
             # if you want to init decoder from pretrained model, it will not restore model
-            if args.restore and (not hparams.decoder_pretrain):
+            if args.restore and (not hparams.pretrain_decoder_no_text) and \
+                    (not hparams.pretrain_decoder_little_text) and \
+                    (not hparams.pretrain_decoder_text_random):
                 # Restore saved model if the user requested it, default = True
                 try:
                     checkpoint_state = tf.train.get_checkpoint_state(save_dir)
@@ -273,12 +279,13 @@ def train(log_dir, args, hparams):
                             after_losses.append(after_loss)
                             stop_token_losses.append(stop_token_loss)
                             linear_losses.append(linear_loss)
-                        linear_loss = sum(linear_losses) / len(linear_losses)
+                        if len(linear_losses) > 0:
+                            linear_loss = sum(linear_losses) / len(linear_losses)
 
-                        wav = audio.inv_linear_spectrogram(lin_p.T, hparams)
-                        audio.save_wav(wav,
-                                       os.path.join(eval_wav_dir, 'step-{}-eval-wave-from-linear.wav'.format(step)),
-                                       sr=hparams.sample_rate)
+                            wav = audio.inv_linear_spectrogram(lin_p.T, hparams)
+                            audio.save_wav(wav,
+                                           os.path.join(eval_wav_dir, 'step-{}-eval-wave-from-linear.wav'.format(step)),
+                                           sr=hparams.sample_rate)
 
                     else:
                         for i in tqdm(range(feeder.test_steps)):
@@ -293,11 +300,14 @@ def train(log_dir, args, hparams):
                             before_losses.append(before_loss)
                             after_losses.append(after_loss)
                             stop_token_losses.append(stop_token_loss)
-
-                    eval_loss = sum(eval_losses) / len(eval_losses)
-                    before_loss = sum(before_losses) / len(before_losses)
-                    after_loss = sum(after_losses) / len(after_losses)
-                    stop_token_loss = sum(stop_token_losses) / len(stop_token_losses)
+                    if len(eval_losses) > 0:
+                        eval_loss = sum(eval_losses) / len(eval_losses)
+                    if len(before_losses) > 0:
+                        before_loss = sum(before_losses) / len(before_losses)
+                    if len(after_losses) > 0:
+                        after_loss = sum(after_losses) / len(after_losses)
+                    if len(stop_token_losses) > 0:
+                        stop_token_loss = sum(stop_token_losses) / len(stop_token_losses)
 
                     log('Saving eval log to {}..'.format(eval_dir))
                     # Save some log to monitor model improvement on same unseen sequence
